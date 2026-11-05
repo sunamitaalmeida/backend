@@ -1,26 +1,27 @@
 const express = require("express");
 const router = express.Router();
-const { query, withConnection, httpError, numericId } = require("./db");
+const { httpError, numericId, models } = require("./db");
+const { sequelize } = require("../mysql");
+const { HistoricoPreco, Produto } = models;
 
 router.get("/", async (req, res) => {
-    const conditions = [];
-    const values = [];
+    const where = {};
     if (req.query.id_produto !== undefined) {
-        conditions.push("h.id_produto = ?");
-        values.push(numericId(req.query.id_produto, "id_produto"));
+        where.id_produto = numericId(req.query.id_produto, "id_produto");
     }
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const historico = await withConnection((conn) =>
-        query(conn, `SELECT h.*, p.nome AS produto FROM historico_precos h LEFT JOIN produtos p ON p.id_produto = h.id_produto ${where} ORDER BY h.vigencia DESC, h.id_historico DESC`, values)
-    );
+    const historico = await HistoricoPreco.findAll({
+        attributes: { include: [[sequelize.col("produto.nome"), "produto"]] },
+        include: [{ model: Produto, as: "produto", attributes: [], required: false }],
+        where,
+        order: [["vigencia", "DESC"], ["id_historico", "DESC"]],
+        raw: true
+    });
     res.status(200).json({ historico });
 });
 
 router.get("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const [historico] = await withConnection((conn) =>
-        query(conn, "SELECT * FROM historico_precos WHERE id_historico = ?", [id])
-    );
+    const historico = await HistoricoPreco.findByPk(id);
     if (!historico) throw httpError(404, "Registro de histórico não encontrado.");
     res.status(200).json({ historico });
 });

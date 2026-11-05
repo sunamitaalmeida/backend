@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
-const { query, withConnection, httpError, numericId, requiredText } = require("./db");
+const { httpError, numericId, requiredText, models } = require("./db");
+const { Funcionario } = models;
 
 function activeFlag(value) {
     const active = Number(value);
@@ -15,13 +16,13 @@ function salary(value) {
 }
 
 router.get("/", async (req, res) => {
-    const funcionarios = await withConnection((conn) => query(conn, "SELECT * FROM funcionarios ORDER BY id_funcionario DESC"));
+    const funcionarios = await Funcionario.findAll({ order: [["id_funcionario", "DESC"]] });
     res.status(200).json({ funcionario: funcionarios });
 });
 
 router.get("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const [funcionario] = await withConnection((conn) => query(conn, "SELECT * FROM funcionarios WHERE id_funcionario = ?", [id]));
+    const funcionario = await Funcionario.findByPk(id);
     if (!funcionario) throw httpError(404, "Funcionário não encontrado.");
     res.status(200).json({ funcionario });
 });
@@ -31,17 +32,21 @@ router.post("/", async (req, res) => {
     const cargo = requiredText(req.body.cargo, "cargo", 50);
     const salarioValue = salary(req.body.salario);
     const ativo = req.body.ativo === undefined ? 1 : activeFlag(req.body.ativo);
-    const result = await withConnection((conn) => query(conn,
-        "INSERT INTO funcionarios (nome, cargo, salario, telefone, email, data_admissao, ativo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [nome, cargo, salarioValue, req.body.telefone || null, req.body.email || null, req.body.data_admissao || null, ativo]
-    ));
-    res.status(201).json({ mensagem: "Funcionário criado com sucesso.", id_funcionario: result.insertId });
+    const funcionario = await Funcionario.create({
+        nome,
+        cargo,
+        salario: salarioValue,
+        telefone: req.body.telefone || null,
+        email: req.body.email || null,
+        data_admissao: req.body.data_admissao || null,
+        ativo
+    });
+    res.status(201).json({ mensagem: "Funcionário criado com sucesso.", id_funcionario: funcionario.id_funcionario });
 });
 
 router.patch("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const fields = [];
-    const values = [];
+    const values = {};
     const validators = {
         nome: (value) => requiredText(value, "nome", 100),
         cargo: (value) => requiredText(value, "cargo", 50),
@@ -53,26 +58,19 @@ router.patch("/:id", async (req, res) => {
     };
     for (const [field, validate] of Object.entries(validators)) {
         if (req.body[field] !== undefined) {
-            fields.push(`${field} = ?`);
-            values.push(validate(req.body[field]));
+            values[field] = validate(req.body[field]);
         }
     }
-    if (!fields.length) throw httpError(400, "Informe ao menos um campo para atualizar.");
-    values.push(id);
-    const result = await withConnection((conn) => query(conn,
-        `UPDATE funcionarios SET ${fields.join(", ")} WHERE id_funcionario = ?`, values
-    ));
-    if (!result.affectedRows) {
-        const [funcionario] = await withConnection((conn) => query(conn, "SELECT id_funcionario FROM funcionarios WHERE id_funcionario = ?", [id]));
-        if (!funcionario) throw httpError(404, "Funcionário não encontrado.");
-    }
+    if (!Object.keys(values).length) throw httpError(400, "Informe ao menos um campo para atualizar.");
+    const [updated] = await Funcionario.update(values, { where: { id_funcionario: id } });
+    if (!updated && !(await Funcionario.findByPk(id))) throw httpError(404, "Funcionário não encontrado.");
     res.status(200).json({ mensagem: "Funcionário atualizado com sucesso." });
 });
 
 router.delete("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const result = await withConnection((conn) => query(conn, "DELETE FROM funcionarios WHERE id_funcionario = ?", [id]));
-    if (!result.affectedRows) throw httpError(404, "Funcionário não encontrado.");
+    const deleted = await Funcionario.destroy({ where: { id_funcionario: id } });
+    if (!deleted) throw httpError(404, "Funcionário não encontrado.");
     res.status(200).json({ mensagem: "Funcionário removido com sucesso." });
 });
 

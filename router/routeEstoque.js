@@ -1,54 +1,58 @@
 const express = require("express");
 const router = express.Router();
-const { query, withConnection, transaction, httpError, numericId } = require("./db");
+const { Op } = require("sequelize");
+const { transaction, httpError, numericId, models } = require("./db");
+const { sequelize } = require("../mysql");
+const { Estoque, Movimentacao, Produto } = models;
+
+async function findStock(options = {}) {
+    return Estoque.findAll({
+        attributes: { include: [[sequelize.col("produto.nome"), "produto"]] },
+        include: [{ model: Produto, as: "produto", attributes: [], required: true }],
+        raw: true,
+        ...options
+    });
+}
 
 router.get("/", async (req, res) => {
-    const estoque = await withConnection((conn) =>
-        query(conn, "SELECT e.*, p.nome AS produto FROM estoque e JOIN produtos p ON p.id_produto = e.id_produto ORDER BY p.nome")
-    );
+    const estoque = await findStock({ order: [[{ model: Produto, as: "produto" }, "nome", "ASC"]] });
     res.status(200).json({ estoque });
 });
 
 router.get("/baixo", async (req, res) => {
-    const estoque = await withConnection((conn) =>
-        query(conn, "SELECT e.*, p.nome AS produto FROM estoque e JOIN produtos p ON p.id_produto = e.id_produto WHERE e.estoque_minimo IS NOT NULL AND e.quantidade <= e.estoque_minimo ORDER BY e.quantidade")
-    );
+    const estoque = await findStock({
+        where: {
+            estoque_minimo: { [Op.ne]: null },
+            [Op.and]: [sequelize.where(sequelize.col("quantidade"), Op.lte, sequelize.col("estoque_minimo"))]
+        },
+        order: [["quantidade", "ASC"]]
+    });
     res.status(200).json({ estoque });
 });
 
 router.get("/:id_produto", async (req, res) => {
     const idProduto = numericId(req.params.id_produto, "id_produto");
-    const [estoque] = await withConnection((conn) =>
-        query(conn, "SELECT e.*, p.nome AS produto FROM estoque e JOIN produtos p ON p.id_produto = e.id_produto WHERE e.id_produto = ?", [idProduto])
-    );
+    const [estoque] = await findStock({ where: { id_produto: idProduto } });
     if (!estoque) throw httpError(404, "Registro de estoque não encontrado.");
     res.status(200).json({ estoque });
 });
 
 router.patch("/:id_produto", async (req, res) => {
     const idProduto = numericId(req.params.id_produto, "id_produto");
-    const fields = [];
-    const values = [];
+    const values = {};
     for (const field of ["estoque_minimo", "estoque_maximo", "localizacao"]) {
         if (req.body[field] !== undefined) {
             if (field !== "localizacao" && req.body[field] !== null &&
                 (!Number.isInteger(Number(req.body[field])) || Number(req.body[field]) < 0)) {
                 throw httpError(400, `${field} deve ser um inteiro maior ou igual a zero ou null.`);
             }
-            fields.push(`${field} = ?`);
-            values.push(req.body[field]);
+            values[field] = req.body[field];
         }
     }
-    if (!fields.length) throw httpError(400, "Informe ao menos um campo de configuração do estoque.");
-    values.push(idProduto);
-    const result = await withConnection((conn) =>
-        query(conn, `UPDATE estoque SET ${fields.join(", ")} WHERE id_produto = ?`, values)
-    );
-    if (!result.affectedRows) {
-        const [exists] = await withConnection((conn) =>
-            query(conn, "SELECT id_produto FROM estoque WHERE id_produto = ?", [idProduto])
-        );
-        if (!exists) throw httpError(404, "Registro de estoque não encontrado.");
+    if (!Object.keys(values).length) throw httpError(400, "Informe ao menos um campo de configuração do estoque.");
+    const [updated] = await Estoque.update(values, { where: { id_produto: idProduto } });
+    if (!updated && !(await Estoque.findOne({ where: { id_produto: idProduto } }))) {
+        throw httpError(404, "Registro de estoque não encontrado.");
     }
     res.status(200).json({ mensagem: "Configurações do estoque atualizadas." });
 });
@@ -60,16 +64,23 @@ router.post("/:id_produto/ajustes", async (req, res) => {
         throw httpError(400, "quantidade deve ser um inteiro maior ou igual a zero.");
     }
     const observacao = typeof req.body.observacao === "string" ? req.body.observacao : "Ajuste manual de estoque";
-    const novaQuantidade = await transaction(async (conn) => {
-        const [stock] = await query(conn, "SELECT quantidade FROM estoque WHERE id_produto = ? FOR UPDATE", [idProduto]);
+    const novaQuantidade = await transaction(async ({ transaction: dbTransaction }) => {
+        const stock = await Estoque.findOne({
+            where: { id_produto: idProduto },
+            transaction: dbTransaction,
+            lock: true
+        });
         if (!stock) throw httpError(404, "Registro de estoque não encontrado.");
         const diferenca = quantidade - stock.quantidade;
-        await query(conn, "UPDATE estoque SET quantidade = ? WHERE id_produto = ?", [quantidade, idProduto]);
+        await stock.update({ quantidade }, { transaction: dbTransaction });
         if (diferenca !== 0) {
-            await query(conn,
-                "INSERT INTO movimentacoes (id_produto, tipo, quantidade, data_movimentacao, observacao) VALUES (?, 'A', ?, NOW(), ?)",
-                [idProduto, diferenca, observacao]
-            );
+            await Movimentacao.create({
+                id_produto: idProduto,
+                tipo: "A",
+                quantidade: diferenca,
+                data_movimentacao: sequelize.literal("NOW()"),
+                observacao
+            }, { transaction: dbTransaction });
         }
         return quantidade;
     });

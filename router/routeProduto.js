@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
-const { query, withConnection, transaction, httpError, numericId, requiredText } = require("./db");
+const { transaction, httpError, numericId, requiredText, models } = require("./db");
+const { sequelize } = require("../mysql");
+const { Produto, HistoricoPreco } = models;
 
 function validPrice(value) {
     const price = Number(value);
@@ -9,25 +11,22 @@ function validPrice(value) {
 }
 
 router.get("/", async (req, res) => {
-    const products = await withConnection((conn) =>
-        query(conn, "SELECT * FROM produtos ORDER BY id_produto DESC")
-    );
+    const products = await Produto.findAll({ order: [["id_produto", "DESC"]] });
     res.status(200).json({ Produtos: products });
 });
 
 router.get("/:id/historico-precos", async (req, res) => {
     const idProduto = numericId(req.params.id);
-    const historico = await withConnection((conn) =>
-        query(conn, "SELECT * FROM historico_precos WHERE id_produto = ? ORDER BY vigencia DESC, id_historico DESC", [idProduto])
-    );
+    const historico = await HistoricoPreco.findAll({
+        where: { id_produto: idProduto },
+        order: [["vigencia", "DESC"], ["id_historico", "DESC"]]
+    });
     res.status(200).json({ historico });
 });
 
 router.get("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const [produto] = await withConnection((conn) =>
-        query(conn, "SELECT * FROM produtos WHERE id_produto = ?", [id])
-    );
+    const produto = await Produto.findByPk(id);
     if (!produto) throw httpError(404, "Produto não encontrado.");
     res.status(200).json({ Produtos: produto });
 });
@@ -41,54 +40,58 @@ router.post("/", async (req, res) => {
         ? null
         : numericId(req.body.id_categoria, "id_categoria");
 
-    const result = await transaction(async (conn) => {
-        const inserted = await query(conn,
-            "INSERT INTO produtos (nome, descricao, preco, imagem_produto, id_categoria) VALUES (?, ?, ?, ?, ?)",
-            [nome, descricao, preco, imagem, idCategoria]
-        );
-        await query(conn,
-            "INSERT INTO historico_precos (id_produto, preco, vigencia) VALUES (?, ?, CURDATE())",
-            [inserted.insertId, preco]
-        );
+    const result = await transaction(async ({ transaction: dbTransaction }) => {
+        const inserted = await Produto.create({
+            nome,
+            descricao,
+            preco,
+            imagem_produto: imagem,
+            id_categoria: idCategoria
+        }, { transaction: dbTransaction });
+        await HistoricoPreco.create({
+            id_produto: inserted.id_produto,
+            preco,
+            vigencia: sequelize.literal("CURDATE()")
+        }, { transaction: dbTransaction });
         return inserted;
     });
-    res.status(201).json({ mensagem: "Produto criado com sucesso.", id_produto: result.insertId });
+    res.status(201).json({ mensagem: "Produto criado com sucesso.", id_produto: result.id_produto });
 });
 
 router.patch("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const fields = [];
-    const values = [];
     const changes = [
         ["nome", (value) => requiredText(value, "nome", 100)],
         ["descricao", (value) => requiredText(value, "descricao", 200)],
         ["imagem_produto", (value) => requiredText(value, "imagem_produto", 255)],
         ["id_categoria", (value) => value === null ? null : numericId(value, "id_categoria")]
     ];
+    const updates = {};
     for (const [field, validate] of changes) {
         if (req.body[field] !== undefined) {
-            fields.push(`${field} = ?`);
-            values.push(validate(req.body[field]));
+            updates[field] = validate(req.body[field]);
         }
     }
     let newPrice;
     if (req.body.preco !== undefined) {
         newPrice = validPrice(req.body.preco);
-        fields.push("preco = ?");
-        values.push(newPrice);
+        updates.preco = newPrice;
     }
-    if (!fields.length) throw httpError(400, "Informe ao menos um campo para atualizar.");
+    if (!Object.keys(updates).length) {
+        throw httpError(400, "Informe ao menos um campo para atualizar.");
+    }
 
-    await transaction(async (conn) => {
-        const [produto] = await query(conn, "SELECT preco FROM produtos WHERE id_produto = ? FOR UPDATE", [id]);
+    await transaction(async ({ transaction: dbTransaction }) => {
+        const produto = await Produto.findByPk(id, { transaction: dbTransaction, lock: true });
         if (!produto) throw httpError(404, "Produto não encontrado.");
-        values.push(id);
-        await query(conn, `UPDATE produtos SET ${fields.join(", ")} WHERE id_produto = ?`, values);
-        if (newPrice !== undefined && Number(produto.preco) !== newPrice) {
-            await query(conn,
-                "INSERT INTO historico_precos (id_produto, preco, vigencia) VALUES (?, ?, CURDATE())",
-                [id, newPrice]
-            );
+        const previousPrice = Number(produto.preco);
+        await produto.update(updates, { transaction: dbTransaction });
+        if (newPrice !== undefined && previousPrice !== newPrice) {
+            await HistoricoPreco.create({
+                id_produto: id,
+                preco: newPrice,
+                vigencia: sequelize.literal("CURDATE()")
+            }, { transaction: dbTransaction });
         }
     });
     res.status(200).json({ mensagem: "Produto atualizado com sucesso." });
@@ -96,10 +99,8 @@ router.patch("/:id", async (req, res) => {
 
 router.delete("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const result = await withConnection((conn) =>
-        query(conn, "DELETE FROM produtos WHERE id_produto = ?", [id])
-    );
-    if (!result.affectedRows) throw httpError(404, "Produto não encontrado.");
+    const deleted = await Produto.destroy({ where: { id_produto: id } });
+    if (!deleted) throw httpError(404, "Produto não encontrado.");
     res.status(200).json({ mensagem: "Produto removido com sucesso." });
 });
 

@@ -1,4 +1,4 @@
-const { query, withConnection, httpError, numericId } = require("./db");
+const { httpError, numericId, models } = require("./db");
 
 function activeFlag(value) {
     const active = Number(value);
@@ -41,8 +41,7 @@ function createCrudRouter({
     idColumn = "id",
     resourceName = "Registro",
     listSelect = "*",
-    customListQuery,
-    customGetQuery,
+    model,
     fields = []
 }) {
     const express = require("express");
@@ -50,83 +49,71 @@ function createCrudRouter({
 
     const insertFields = fields.filter((field) => normalizeField(field).insert !== false).map(normalizeField);
     const updateFields = fields.filter((field) => normalizeField(field).update !== false).map(normalizeField);
+    const resourceModel = model || models[tableName];
+    if (!resourceModel) throw new Error(`Modelo Sequelize não configurado para a tabela ${tableName}.`);
 
     router.get("/", async (req, res) => {
-        const sql = customListQuery || `SELECT ${listSelect} FROM ${tableName} ORDER BY ${idColumn} DESC`;
-        const rows = await withConnection((conn) => query(conn, sql));
+        const rows = await resourceModel.findAll({
+            attributes: listSelect === "*" ? undefined : listSelect.split(",").map((field) => field.trim()),
+            order: [[idColumn, "DESC"]]
+        });
         res.status(200).json({ [resourceName]: rows });
     });
 
     router.get("/:id", async (req, res) => {
         const id = numericId(req.params.id, idColumn);
-        const sql = customGetQuery || `SELECT ${listSelect} FROM ${tableName} WHERE ${idColumn} = ?`;
-        const [row] = await withConnection((conn) => query(conn, sql, [id]));
+        const row = await resourceModel.findByPk(id, {
+            attributes: listSelect === "*" ? undefined : listSelect.split(",").map((field) => field.trim())
+        });
         if (!row) throw httpError(404, `${resourceName} não encontrado.`);
         res.status(200).json({ [resourceName]: row });
     });
 
     router.post("/", async (req, res) => {
-        const columns = [];
-        const values = [];
+        const values = {};
 
         for (const field of insertFields) {
             const value = resolveInsertValue(req.body, field);
             if (value === undefined) continue;
-            columns.push(field.key);
-            values.push(value);
+            values[field.key] = value;
         }
 
-        if (!columns.length) {
+        if (!Object.keys(values).length) {
             throw httpError(400, `Informe ao menos um campo para criar ${resourceName.toLowerCase()}.`);
         }
 
-        const result = await withConnection((conn) =>
-            query(conn, `INSERT INTO ${tableName} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`, values)
-        );
+        const result = await resourceModel.create(values);
 
         res.status(201).json({
             mensagem: `${resourceName} criado com sucesso.`,
-            [idColumn]: result.insertId
+            [idColumn]: result.get(idColumn)
         });
     });
 
     router.patch("/:id", async (req, res) => {
         const id = numericId(req.params.id, idColumn);
-        const fieldsToUpdate = [];
-        const values = [];
+        const values = {};
 
         for (const field of updateFields) {
             const value = resolveUpdateValue(req.body, field);
             if (value === undefined) continue;
-            fieldsToUpdate.push(`${field.key} = ?`);
-            values.push(value);
+            values[field.key] = value;
         }
 
-        if (!fieldsToUpdate.length) {
+        if (!Object.keys(values).length) {
             throw httpError(400, "Informe ao menos um campo para atualizar.");
         }
 
-        values.push(id);
-        const result = await withConnection((conn) =>
-            query(conn, `UPDATE ${tableName} SET ${fieldsToUpdate.join(", ")} WHERE ${idColumn} = ?`, values)
-        );
-
-        if (!result.affectedRows) {
-            const [row] = await withConnection((conn) =>
-                query(conn, `SELECT ${idColumn} FROM ${tableName} WHERE ${idColumn} = ?`, [id])
-            );
-            if (!row) throw httpError(404, `${resourceName} não encontrado.`);
-        }
+        const [updated] = await resourceModel.update(values, { where: { [idColumn]: id } });
+        if (!updated && !(await resourceModel.findByPk(id))) throw httpError(404, `${resourceName} não encontrado.`);
 
         res.status(200).json({ mensagem: `${resourceName} atualizado com sucesso.` });
     });
 
     router.delete("/:id", async (req, res) => {
         const id = numericId(req.params.id, idColumn);
-        const result = await withConnection((conn) =>
-            query(conn, `DELETE FROM ${tableName} WHERE ${idColumn} = ?`, [id])
-        );
-        if (!result.affectedRows) throw httpError(404, `${resourceName} não encontrado.`);
+        const deleted = await resourceModel.destroy({ where: { [idColumn]: id } });
+        if (!deleted) throw httpError(404, `${resourceName} não encontrado.`);
         res.status(200).json({ mensagem: `${resourceName} removido com sucesso.` });
     });
 

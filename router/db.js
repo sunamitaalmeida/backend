@@ -1,46 +1,8 @@
-const pool = require("../mysql").pool;
-
-function query(connection, sql, values = []) {
-    return new Promise((resolve, reject) => {
-        connection.query(sql, values, (error, result) => {
-            if (error) return reject(error);
-            resolve(result);
-        });
-    });
-}
-
-function withConnection(callback) {
-    return new Promise((resolve, reject) => {
-        pool.getConnection(async (error, connection) => {
-            if (error) return reject(error);
-            try {
-                resolve(await callback(connection));
-            } catch (callbackError) {
-                reject(callbackError);
-            } finally {
-                connection.release();
-            }
-        });
-    });
-}
+const { sequelize, models } = require("../mysql");
 
 function transaction(callback) {
-    return withConnection(async (connection) => {
-        await new Promise((resolve, reject) => {
-            connection.beginTransaction((error) => error ? reject(error) : resolve());
-        });
-        try {
-            const result = await callback(connection);
-            await new Promise((resolve, reject) => {
-                connection.commit((error) => error ? reject(error) : resolve());
-            });
-            return result;
-        } catch (error) {
-            await new Promise((resolve, reject) => {
-                connection.rollback((rollbackError) => rollbackError ? reject(rollbackError) : resolve());
-            });
-            throw error;
-        }
+    return sequelize.transaction(async (sequelizeTransaction) => {
+        return callback({ transaction: sequelizeTransaction });
     });
 }
 
@@ -73,4 +35,4 @@ function positiveInteger(value, field) {
     return number;
 }
 
-module.exports = { query, withConnection, transaction, httpError, numericId, requiredText, positiveInteger };
+module.exports = { transaction, httpError, numericId, requiredText, positiveInteger, models };

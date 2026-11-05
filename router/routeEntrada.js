@@ -1,30 +1,33 @@
 const express = require("express");
 const router = express.Router();
-const { query, withConnection, transaction, httpError, numericId, positiveInteger } = require("./db");
+const { transaction, httpError, numericId, positiveInteger, models } = require("./db");
+const { sequelize } = require("../mysql");
+const { Entrada, Movimentacao, Produto, Fornecedor } = models;
 
 router.get("/", async (req, res) => {
-    const filters = [];
-    const values = [];
+    const where = {};
     if (req.query.id_produto !== undefined) {
-        filters.push("e.id_produto = ?");
-        values.push(numericId(req.query.id_produto, "id_produto"));
+        where.id_produto = numericId(req.query.id_produto, "id_produto");
     }
     if (req.query.id_fornecedor !== undefined) {
-        filters.push("e.id_fornecedor = ?");
-        values.push(numericId(req.query.id_fornecedor, "id_fornecedor"));
+        where.id_fornecedor = numericId(req.query.id_fornecedor, "id_fornecedor");
     }
-    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const entradas = await withConnection((conn) =>
-        query(conn, `SELECT e.*, p.nome AS produto, f.nome AS fornecedor FROM entradas e JOIN produtos p ON p.id_produto = e.id_produto JOIN fornecedores f ON f.id_fornecedor = e.id_fornecedor ${where} ORDER BY e.id_entrada DESC`, values)
-    );
+    const entradas = await Entrada.findAll({
+        attributes: { include: [[sequelize.col("produto.nome"), "produto"], [sequelize.col("fornecedor.nome"), "fornecedor"]] },
+        include: [
+            { model: Produto, as: "produto", attributes: [], required: true },
+            { model: Fornecedor, as: "fornecedor", attributes: [], required: true }
+        ],
+        where,
+        order: [["id_entrada", "DESC"]],
+        raw: true
+    });
     res.status(200).json({ entradas });
 });
 
 router.get("/:id", async (req, res) => {
     const id = numericId(req.params.id);
-    const [entrada] = await withConnection((conn) =>
-        query(conn, "SELECT * FROM entradas WHERE id_entrada = ?", [id])
-    );
+    const entrada = await Entrada.findByPk(id);
     if (!entrada) throw httpError(404, "Entrada não encontrada.");
     res.status(200).json({ entrada });
 });
@@ -37,18 +40,25 @@ router.post("/", async (req, res) => {
     if (!Number.isFinite(valorUnitario) || valorUnitario < 0) {
         throw httpError(400, "valor_unitario deve ser um número maior ou igual a zero.");
     }
-    const result = await transaction(async (conn) => {
-        const inserted = await query(conn,
-            "INSERT INTO entradas (id_produto, id_fornecedor, quantidade, valor_unitario, data_entrada, observacao) VALUES (?, ?, ?, ?, COALESCE(?, CURDATE()), ?)",
-            [idProduto, idFornecedor, quantidade, valorUnitario, req.body.data_entrada || null, req.body.observacao || null]
-        );
-        await query(conn,
-            "INSERT INTO movimentacoes (id_produto, tipo, quantidade, data_movimentacao, observacao) VALUES (?, 'E', ?, NOW(), ?)",
-            [idProduto, quantidade, req.body.observacao || `Entrada ${inserted.insertId}`]
-        );
+    const result = await transaction(async ({ transaction: dbTransaction }) => {
+        const inserted = await Entrada.create({
+            id_produto: idProduto,
+            id_fornecedor: idFornecedor,
+            quantidade,
+            valor_unitario: valorUnitario,
+            data_entrada: req.body.data_entrada || sequelize.literal("CURDATE()"),
+            observacao: req.body.observacao || null
+        }, { transaction: dbTransaction });
+        await Movimentacao.create({
+            id_produto: idProduto,
+            tipo: "E",
+            quantidade,
+            data_movimentacao: sequelize.literal("NOW()"),
+            observacao: req.body.observacao || `Entrada ${inserted.id_entrada}`
+        }, { transaction: dbTransaction });
         return inserted;
     });
-    res.status(201).json({ mensagem: "Entrada registrada com sucesso.", id_entrada: result.insertId });
+    res.status(201).json({ mensagem: "Entrada registrada com sucesso.", id_entrada: result.id_entrada });
 });
 
 module.exports = router;
